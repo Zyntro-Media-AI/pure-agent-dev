@@ -1,0 +1,321 @@
+name: CrystalCastle Production CI/CD
+
+jobs:
+  use_api:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl --request GET \
+          --url "https://api.github.com/PATH" \
+          --header "Authorization: Bearer $GH_TOKEN"
+defaults:
+  
+on:
+push:
+branches:
+- main
+pull_request:
+types:
+- opened
+- synchronize
+- reopened
+
+permissions:
+contents: read
+pull-requests: write
+security-events: write
+actions: read
+
+concurrency:
+group: ${{ github.workflow }}-${{ github.ref }}
+cancel-in-progress: true
+
+env:
+NODE_VERSION: "20"
+PYTHON_VERSION: "3.11"
+
+jobs:
+
+source:
+name: Checkout Source
+runs-on: ubuntu-latest
+
+steps:
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+
+ai-test:
+name: AI Smoke Tests
+runs-on: ubuntu-latest
+
+steps:
+  - name: Checkout Repository
+    uses: actions/checkout@v4
+
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: ${{ env.PYTHON_VERSION }}
+
+  - name: Install Python Dependencies
+    run: |
+      python -m pip install --upgrade pip
+
+      if [ -f requirements.txt ]; then
+        pip install -r requirements.txt
+      fi
+
+  - name: Run Smoke Tests
+    run: |
+      mkdir -p tests/ai/results
+
+      pytest tests/test_smoke_generation.py \
+        --junitxml=tests/ai/results/smoke-results.xml
+
+  - name: Upload AI Results
+    uses: actions/upload-artifact@v4
+    with:
+      name: ai-test-results
+      path: tests/ai/results/
+      if-no-files-found: ignore
+
+lint:
+name: Lint
+runs-on: ubuntu-latest
+
+steps:
+  - uses: actions/checkout@v4
+
+  - uses: pnpm/action-setup@v4
+    with:
+      version: 9
+
+  - uses: actions/setup-node@v4
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+      cache: pnpm
+
+  - name: Install Dependencies
+    run: pnpm install --frozen-lockfile
+
+  - name: Run Lint
+    run: pnpm lint
+
+unit-test:
+name: Unit Tests
+runs-on: ubuntu-latest
+
+steps:
+  - uses: actions/checkout@v4
+
+  - uses: pnpm/action-setup@v4
+    with:
+      version: 9
+
+  - uses: actions/setup-node@v4
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+      cache: pnpm
+
+  - name: Install Dependencies
+    run: pnpm install --frozen-lockfile
+
+  - name: Run Tests
+    run: pnpm test
+
+pr-description:
+name: Auto PR Description
+if: github.event_name == 'pull_request'
+runs-on: ubuntu-latest
+
+steps:
+  - name: Generate PR Description
+    uses: actions/github-script@v7
+    with:
+      script: |
+        const pr = context.payload.pull_request;
+
+        if (!pr.body || pr.body.trim() === "") {
+
+          const commits = await github.rest.pulls.listCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr.number
+          });
+
+          const commitList = commits.data
+            .map(c => `- ${c.commit.message.split('\n')[0]}`)
+            .join('\n');
+
+          const template = `
+        ## 🚀 Pull Request
+
+        ### 📌 Summary
+        Auto-generated summary based on commit history.
+
+        ---
+
+        ### 🔄 Changes
+        ${commitList}
+
+        ---
+
+        ### ✅ Checklist
+
+        - [ ] Feature works correctly
+        - [ ] Tests added or updated
+        - [ ] Documentation updated
+        - [ ] AI cost reviewed
+
+        ---
+
+        ### 🔗 Related Issue
+
+        Related: #<issue-number>
+
+        ---
+
+        ### 📝 Notes
+
+        Generated automatically by CrystalCastle CI/CD.
+          `;
+
+          await github.rest.pulls.update({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            pull_number: pr.number,
+            body: template
+          });
+        }
+
+build-test:
+name: Build & Test Matrix
+
+needs:
+  - source
+  - lint
+  - unit-test
+  - ai-test
+
+runs-on: ${{ matrix.os }}
+
+strategy:
+  fail-fast: false
+
+  matrix:
+    os:
+      - ubuntu-latest
+      - windows-latest
+      - macos-latest
+
+    node:
+      - 18
+      - 20
+
+steps:
+  - uses: actions/checkout@v4
+
+  - name: Setup Node
+    uses: actions/setup-node@v4
+    with:
+      node-version: ${{ matrix.node }}
+
+  - name: Install Dependencies
+    run: npm ci
+
+  - name: Build Project
+    run: npm run build
+
+  - name: Run Coverage Tests
+    run: npm test -- --coverage
+
+  - name: Upload Coverage
+    uses: actions/upload-artifact@v4
+    with:
+      name: coverage-${{ matrix.os }}-${{ matrix.node }}
+      path: coverage/
+
+pr-summary:
+name: AI PR Summary
+if: github.event_name == 'pull_request'
+runs-on: ubuntu-latest
+
+steps:
+  - uses: actions/checkout@v4
+
+  - name: Setup Node
+    uses: actions/setup-node@v4
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+
+  - name: Install Dependencies
+    run: npm ci
+
+  - name: Generate Summary
+    run: node scripts/summarize-pr.js
+
+codeql:
+name: CodeQL Security Scan
+
+needs: build-test
+runs-on: ubuntu-latest
+
+steps:
+  - uses: actions/checkout@v4
+
+  - name: Initialize CodeQL
+    uses: github/codeql-action/init@v3
+    with:
+      languages: javascript
+
+  - name: Autobuild
+    uses: github/codeql-action/autobuild@v3
+
+  - name: Analyze
+    uses: github/codeql-action/analyze@v3
+
+deploy:
+name: Production Deploy
+
+if: github.ref == 'refs/heads/main'
+needs: codeql
+
+runs-on: ubuntu-latest
+
+steps:
+  - uses: actions/checkout@v4
+
+  - name: Install Vercel CLI
+    run: npm install -g vercel
+
+  - name: Deploy to Vercel
+    run: |
+      vercel deploy \
+        --prod \
+        --token=${{ secrets.VERCEL_TOKEN }}
+
+notify:
+name: Notifications
+
+if: always()
+
+needs:
+  - build-test
+  - codeql
+  - deploy
+
+runs-on: ubuntu-latest
+
+steps:
+  - name: Slack Notification
+    uses: slackapi/slack-github-action@v1.27.0
+    with:
+      payload: |
+        {
+          "text": "🚀 CrystalCastle Production Pipeline Completed"
+        }
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
