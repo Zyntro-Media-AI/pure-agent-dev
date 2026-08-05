@@ -1,0 +1,304 @@
+name: Security and Compliance
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+
+  pull_request:
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+
+env:
+  NODE_VERSION: 22
+
+
+jobs:
+
+  # ---------------------------------------
+  # Secret scanning
+  # ---------------------------------------
+  trufflehog-scan:
+
+    name: Secret Detection
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: TruffleHog Scan
+        uses: trufflesecurity/trufflehog@main
+
+        with:
+          path: ./
+          base: ${{ github.event.before }}
+          head: ${{ github.sha }}
+          extra_args: >
+            --only-verified
+
+
+
+  # ---------------------------------------
+  # Hardcoded secret pattern check
+  # ---------------------------------------
+  secret-pattern-check:
+
+    name: Secret Pattern Check
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+
+      - name: Scan suspicious patterns
+
+        shell: bash
+
+        run: |
+
+          echo "Checking possible secrets..."
+
+          if grep -RniE \
+          "(API_KEY|SECRET_KEY|PASSWORD|TOKEN|PRIVATE_KEY|ACCESS_KEY)" \
+          --exclude-dir=node_modules \
+          --exclude-dir=.git \
+          .; then
+
+            echo "Possible secret detected"
+            exit 1
+
+          fi
+
+
+
+  # ---------------------------------------
+  # Dependency security
+  # ---------------------------------------
+  dependency-audit:
+
+    name: Dependency Audit
+
+    runs-on: ubuntu-latest
+
+
+    strategy:
+
+      matrix:
+
+        path:
+          - backend
+          - frontend
+
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+
+      - name: Setup Node
+
+        uses: actions/setup-node@v4
+
+        with:
+
+          node-version: ${{ env.NODE_VERSION }}
+
+          cache: npm
+
+          cache-dependency-path: |
+            ${{ matrix.path }}/package-lock.json
+
+
+
+      - name: Install
+
+        working-directory: ${{ matrix.path }}
+
+        run: npm ci
+
+
+
+      - name: npm audit
+
+        working-directory: ${{ matrix.path }}
+
+        run: |
+
+          npm audit \
+          --audit-level=high
+
+
+
+  # ---------------------------------------
+  # Filesystem vulnerability scan
+  # ---------------------------------------
+  trivy-filesystem:
+
+
+    name: Trivy Filesystem Scan
+
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      - uses: actions/checkout@v4
+
+
+      - name: Trivy Scan
+
+
+        uses: aquasecurity/trivy-action@v0.28.0
+
+        with:
+
+          scan-type: fs
+
+          scan-ref: .
+
+          format: sarif
+
+          output: trivy-results.sarif
+
+          severity: HIGH,CRITICAL
+
+          ignore-unfixed: true
+
+
+
+      - name: Upload SARIF
+
+
+        uses: github/codeql-action/upload-sarif@v3
+
+        with:
+
+          sarif_file: trivy-results.sarif
+
+
+
+  # ---------------------------------------
+  # Ignore file protection
+  # ---------------------------------------
+  ignore-file-check:
+
+
+    name: Protect Ignore Files
+
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      - uses: actions/checkout@v4
+
+
+      - name: Check changes
+
+
+        shell: bash
+
+
+        run: |
+
+
+          FILES=$(git diff --name-only \
+          ${{ github.event.pull_request.base.sha }} \
+          ${{ github.sha }})
+
+
+          if echo "$FILES" | grep -E \
+          "(.gitignore|.dockerignore|.eslintignore|.vercelignore)"; then
+
+
+              echo "Protected ignore file modified"
+
+              exit 1
+
+
+          fi
+
+
+
+  # ---------------------------------------
+  # Repository consistency
+  # ---------------------------------------
+  repo-verify:
+
+
+    name: Repository Verification
+
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+
+      - uses: actions/checkout@v4
+
+
+      - uses: actions/setup-node@v4
+
+        with:
+
+          node-version: ${{ env.NODE_VERSION }}
+
+
+
+      - name: Version check
+
+
+        shell: bash
+
+
+        run: |
+
+
+          VERSION=$(node -p \
+          "require('./package.json').version")
+
+
+          CHANGELOG_VERSION=$(grep \
+          -m1 '^## ' \
+          CHANGELOG.md | sed 's/## //')
+
+
+          echo "Package: $VERSION"
+
+          echo "Changelog: $CHANGELOG_VERSION"
+
+
+
+          if [ "$VERSION" != "$CHANGELOG_VERSION" ];
+
+          then
+
+             echo "Version mismatch"
+
+             exit 1
+
+          fi
