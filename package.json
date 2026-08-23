@@ -1,0 +1,24 @@
+{
+  "name": "pure-agent-dev",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI agent development platform with FastAPI, Python and cloud provider adapters",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "validate:json": "prettier --check \"**/*.json\"",
+    "validate:yaml": "prettier --check \"**/*.{yml,yaml}\"",
+    "check": "npm run format:check && npm run lint",
+    "ci": "npm run check"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0"
+  }
+}
